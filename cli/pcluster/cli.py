@@ -16,10 +16,19 @@ import logging
 import os
 import sys
 import textwrap
+from logging.handlers import RotatingFileHandler
 
 import argparse
+from botocore.exceptions import NoCredentialsError
 
-from pcluster import easyconfig, pcluster
+import pcluster.commands as pcluster
+import pcluster.configure.easyconfig as easyconfig
+import pcluster.createami as createami
+import pcluster.utils as utils
+from pcluster.dcv.connect import dcv_connect
+from pcluster.update import update_command
+
+LOGGER = logging.getLogger(__name__)
 
 
 def create(args):
@@ -30,16 +39,20 @@ def configure(args):
     easyconfig.configure(args)
 
 
-def command(args, extra_args):
-    pcluster.command(args, extra_args)
+def ssh(args, extra_args):
+    pcluster.ssh(args, extra_args)
+
+
+def dcv(args):
+    dcv_connect(args)
 
 
 def status(args):
     pcluster.status(args)
 
 
-def list(args):
-    pcluster.list(args)
+def list_stacks(args):
+    pcluster.list_stacks(args)
 
 
 def delete(args):
@@ -51,11 +64,11 @@ def instances(args):
 
 
 def update(args):
-    pcluster.update(args)
+    update_command.execute(args)
 
 
 def version(args):
-    pcluster.version(args)
+    print(pcluster.version())
 
 
 def start(args):
@@ -67,42 +80,44 @@ def stop(args):
 
 
 def create_ami(args):
-    pcluster.create_ami(args)
+    createami.create_ami(args)
 
 
 def config_logger():
-    logger = logging.getLogger("pcluster.pcluster")
+    logger = logging.getLogger("pcluster")
+    file_only_logger = logging.getLogger("cli_log_file")
     logger.setLevel(logging.DEBUG)
 
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(ch)
+    log_stream_handler = logging.StreamHandler(sys.stdout)
+    log_stream_handler.setLevel(logging.INFO)
+    log_stream_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(log_stream_handler)
 
-    logfile = os.path.expanduser(os.path.join("~", ".parallelcluster", "pcluster-cli.log"))
+    logfile = utils.get_cli_log_file()
     try:
         os.makedirs(os.path.dirname(logfile))
     except OSError as e:
         if e.errno != errno.EEXIST:
             raise  # can safely ignore EEXISTS for this purpose...
 
-    fh = logging.FileHandler(logfile)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s"))
-    logger.addHandler(fh)
+    log_file_handler = RotatingFileHandler(logfile, maxBytes=5 * 1024 * 1024, backupCount=1)
+    log_file_handler.setLevel(logging.DEBUG)
+    log_file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(module)s - %(message)s"))
+    logger.addHandler(log_file_handler)
+    file_only_logger.addHandler(log_file_handler)
 
 
 def _addarg_config(subparser):
-    subparser.add_argument("-c", "--config", dest="config_file", help="alternative config file")
+    subparser.add_argument("-c", "--config", dest="config_file", help="Defines an alternative config file.")
 
 
 def _addarg_region(subparser):
-    subparser.add_argument("-r", "--region", help="region to connect to")
+    subparser.add_argument("-r", "--region", help="Indicates which region to connect to.")
 
 
 def _addarg_nowait(subparser):
     subparser.add_argument(
-        "-nw", "--nowait", action="store_true", help="do not wait for stack events, after executing stack command"
+        "-nw", "--nowait", action="store_true", help="Do not wait for stack events after executing stack command."
     )
 
 
@@ -114,8 +129,8 @@ def _get_parser():
     """
     parser = argparse.ArgumentParser(
         description="pcluster is the AWS ParallelCluster CLI and permits "
-        "to launch and manage HPC clusters in the AWS cloud.",
-        epilog='For command specific flags run "pcluster [command] --help"',
+        "launching and management of HPC clusters in the AWS cloud.",
+        epilog='For command specific flags, please run: "pcluster [command] --help"',
     )
     subparsers = parser.add_subparsers()
     subparsers.required = True
@@ -123,13 +138,13 @@ def _get_parser():
 
     # create command subparser
     create_example = textwrap.dedent(
-        """When the command is called and it starts polling for status of that call
-it is safe to "Ctrl-C" out. You can always return to that status by calling "pcluster status mycluster".
+        """When the command is called and begins polling for status of that call,
+it is safe to use 'Ctrl-C' to exit. You can return to viewing the current
+status by calling "pcluster status mycluster".
 
 Examples::
 
-  $ pcluster create mycluster
-  $ pcluster create mycluster --tags \'{ "Key1" : "Value1" , "Key2" : "Value2" }\'"""
+  $ pcluster create mycluster"""
     )
     pcreate = subparsers.add_parser(
         "create",
@@ -139,60 +154,97 @@ Examples::
     )
     pcreate.add_argument(
         "cluster_name",
-        help="name for the cluster. The CloudFormation Stack name will be " "parallelcluster-[cluster_name]",
+        help="Defines the name of the cluster. The CloudFormation stack name will be " "parallelcluster-[cluster_name]",
     )
     _addarg_config(pcreate)
     _addarg_region(pcreate)
     _addarg_nowait(pcreate)
     pcreate.add_argument(
-        "-nr", "--norollback", action="store_true", default=False, help="disable stack rollback on error"
+        "-nr", "--norollback", action="store_true", default=False, help="Disables stack rollback on error."
     )
     pcreate.add_argument(
         "-u",
         "--template-url",
-        help="specify URL for the custom CloudFormation template, " "if it has been used at creation time",
+        help="Specifies the URL for a custom CloudFormation template, if it was used at creation time.",
     )
-    pcreate.add_argument("-t", "--cluster-template", help="cluster template to use")
-    pcreate.add_argument("-p", "--extra-parameters", type=json.loads, help="add extra parameters to stack create")
-    pcreate.add_argument("-g", "--tags", type=json.loads, help="tags to be added to the stack")
+    pcreate.add_argument(
+        "-t",
+        "--cluster-template",
+        help="Indicates which section of the configuration file to use for cluster creation.",
+    )
+    pcreate.add_argument(
+        "-p",
+        "--extra-parameters",
+        type=json.loads,
+        help="Adds extra parameters to pass as input to the CloudFormation template.\n"
+        'They must be in the form: {"ParameterKey1": "ParameterValue1", "ParameterKey2": "ParameterValue2"}',
+    )
+    pcreate.add_argument(
+        "-g",
+        "--tags",
+        type=json.loads,
+        help="Specifies additional tags to be added to the stack.\n"
+        'They must be in the form: {"Key1": "Value1", "Key2": "Value2"}',
+    )
     pcreate.set_defaults(func=create)
 
     # update command subparser
     pupdate = subparsers.add_parser(
         "update",
-        help="Updates a running cluster by using the values in the config " "file or a TEMPLATE_URL provided.",
-        epilog="When the command is called and it starts polling for status of that call "
+        help="Updates a running cluster using the values in the config file.",
+        epilog="When the command is called and it begins polling for the status of that call, "
         'it is safe to "Ctrl-C" out. You can always return to that status by '
-        'calling "pcluster status mycluster"',
+        'calling "pcluster status mycluster".',
     )
-    pupdate.add_argument("cluster_name", help="name of the cluster to update")
+    pupdate.add_argument("cluster_name", help="Names the cluster to update.")
     _addarg_config(pupdate)
     _addarg_region(pupdate)
     _addarg_nowait(pupdate)
     pupdate.add_argument(
-        "-nr", "--norollback", action="store_true", default=False, help="disable CloudFormation Stack rollback on error"
+        "-nr",
+        "--norollback",
+        action="store_true",
+        default=False,
+        help="Disable CloudFormation stack rollback on error.",
     )
-    pupdate.add_argument("-u", "--template-url", help="URL for a custom CloudFormation template")
-    pupdate.add_argument("-t", "--cluster-template", help="specific cluster template to use")
-    pupdate.add_argument("-p", "--extra-parameters", help="add extra parameters to stack update")
+    pupdate.add_argument(
+        "-t", "--cluster-template", help="Indicates which section of the configuration file to use for cluster update."
+    )
+    pupdate.add_argument(
+        "-p",
+        "--extra-parameters",
+        type=json.loads,
+        help="Adds extra parameters to pass as input to the CloudFormation template.\n"
+        'They must be in the form: {"ParameterKey1": "ParameterValue1", "ParameterKey2": "ParameterValue2"}',
+    )
     pupdate.add_argument(
         "-rd",
         "--reset-desired",
         action="store_true",
         default=False,
-        help="reset the current ASG desired capacity to initial config values",
+        help="Resets the current ASG desired capacity to the initial config values.",
     )
+    pupdate.add_argument(
+        "-f", "--force", action="store_true", help="Forces the update skipping security checks. Not recommended."
+    )
+    pupdate.add_argument("-y", "--yes", action="store_true", help="Assumes 'yes' as answer to confirmation prompt.")
     pupdate.set_defaults(func=update)
 
     # delete command subparser
     pdelete = subparsers.add_parser(
         "delete",
         help="Deletes a cluster.",
-        epilog="When the command is called and it starts polling for status of that call "
-        'it is safe to "Ctrl-C" out. You can always return to that status by '
-        'calling "pcluster status mycluster"',
+        epilog="When the command is called and it begins polling for the status of that call "
+        'it is safe to "Ctrl-C" out. You can return to that status by '
+        'calling "pcluster status mycluster".',
     )
-    pdelete.add_argument("cluster_name", help="name of the cluster to delete")
+    pdelete.add_argument("cluster_name", help="Names the cluster to delete.")
+    pdelete.add_argument(
+        "--keep-logs",
+        action="store_true",
+        help="Keep cluster's CloudWatch log group data after deleting. The log group will persist until it's deleted "
+        "manually, but log events will still expire based on the previously configured retention time.",
+    )
     _addarg_config(pdelete)
     _addarg_region(pdelete)
     _addarg_nowait(pdelete)
@@ -203,11 +255,11 @@ Examples::
         "start",
         help="Starts the compute fleet for a cluster that has been stopped.",
         epilog="This command sets the Auto Scaling Group parameters to either the initial "
-        "configuration values (max_queue_size and initial_queue_size) from the "
+        "configuration values (max_queue_size and initial_queue_size) specified in the "
         "template that was used to create the cluster or to the configuration values "
-        "that were used to update the cluster since creation.",
+        "that were used to update the cluster after it was created.",
     )
-    pstart.add_argument("cluster_name", help="starts the compute fleet of the provided cluster name")
+    pstart.add_argument("cluster_name", help="Starts the compute fleet of the cluster name provided here.")
     _addarg_config(pstart)
     _addarg_region(pstart)
     pstart.set_defaults(func=start)
@@ -216,18 +268,18 @@ Examples::
     pstop = subparsers.add_parser(
         "stop",
         help="Stops the compute fleet, leaving the master server running.",
-        epilog="Sets the Auto Scaling Group parameters to min/max/desired = 0/0/0 and "
+        epilog="This command sets the Auto Scaling Group parameters to min/max/desired = 0/0/0 and "
         "terminates the compute fleet. The master will remain running. To terminate "
         "all EC2 resources and avoid EC2 charges, consider deleting the cluster.",
     )
-    pstop.add_argument("cluster_name", help="stops the compute fleet of the provided cluster name")
+    pstop.add_argument("cluster_name", help="Stops the compute fleet of the cluster name provided here.")
     _addarg_config(pstop)
     _addarg_region(pstop)
     pstop.set_defaults(func=stop)
 
     # status command subparser
     pstatus = subparsers.add_parser("status", help="Pulls the current status of the cluster.")
-    pstatus.add_argument("cluster_name", help="Shows the status of the cluster with the provided name.")
+    pstatus.add_argument("cluster_name", help="Shows the status of the cluster with the name provided here.")
     _addarg_config(pstatus)
     _addarg_region(pstatus)
     _addarg_nowait(pstatus)
@@ -237,15 +289,16 @@ Examples::
     plist = subparsers.add_parser(
         "list",
         help="Displays a list of stacks associated with AWS ParallelCluster.",
-        epilog="Lists the Stack Name of the CloudFormation stacks named parallelcluster-*",
+        epilog="This command lists the names of any CloudFormation stacks named parallelcluster-*",
     )
+    plist.add_argument("--color", action="store_true", default=False, help="Display the cluster status in color.")
     _addarg_config(plist)
     _addarg_region(plist)
-    plist.set_defaults(func=list)
+    plist.set_defaults(func=list_stacks)
 
     # instances command subparser
     pinstances = subparsers.add_parser("instances", help="Displays a list of all instances in a cluster.")
-    pinstances.add_argument("cluster_name", help="Display the instances for the cluster with the provided name.")
+    pinstances.add_argument("cluster_name", help="Display the instances for the cluster with the name provided here.")
     _addarg_config(pinstances)
     _addarg_region(pinstances)
     pinstances.set_defaults(func=instances)
@@ -256,11 +309,11 @@ Examples::
 
   $ pcluster ssh mycluster -i ~/.ssh/id_rsa
 
-results in an ssh command with username and IP address pre-filled::
+Returns an ssh command with the cluster username and IP address pre-populated::
 
   $ ssh ec2-user@1.1.1.1 -i ~/.ssh/id_rsa
 
-SSH command is defined in the global config file, under the aliases section and can be customized::
+The SSH command is defined in the global config file under the aliases section and it can be customized::
 
   [aliases]
   ssh = ssh {CFN_USER}@{MASTER_IP} {ARGS}
@@ -273,60 +326,105 @@ Variables substituted::
     )
     pssh = subparsers.add_parser(
         "ssh",
-        help="Connect to the master server using SSH.",
-        description="Run ssh command with username and IP address pre-filled. "
+        help="Connects to the master instance using SSH.",
+        description="Run ssh command with the cluster username and IP address pre-populated. "
         "Arbitrary arguments are appended to the end of the ssh command. "
-        "This command may be customized in the aliases "
+        "This command can be customized in the aliases "
         "section of the config file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=ssh_example,
     )
-    pssh.add_argument("cluster_name", help="name of the cluster to connect to")
-    pssh.add_argument("-d", "--dryrun", action="store_true", default=False, help="print command and exit")
-    pssh.set_defaults(func=command)
+    pssh.add_argument("cluster_name", help="Name of the cluster to connect to.")
+    pssh.add_argument("-d", "--dryrun", action="store_true", default=False, help="Prints command and exits.")
+    pssh.set_defaults(func=ssh)
 
     # createami command subparser
-    pami = subparsers.add_parser("createami", help="(Linux/OSX) Creates a custom AMI to use with AWS ParallelCluster.")
+    pami = subparsers.add_parser(
+        "createami", help="(Linux/macOS) Creates a custom AMI to use with AWS ParallelCluster."
+    )
     pami.add_argument(
         "-ai",
         "--ami-id",
         dest="base_ami_id",
         required=True,
-        help="specify the base AMI to use for building the AWS ParallelCluster AMI",
+        help="Specifies the base AMI to use for building the AWS ParallelCluster AMI.",
     )
     pami.add_argument(
         "-os",
         "--os",
         dest="base_ami_os",
         required=True,
-        help="specify the OS of the base AMI. " "Valid values are alinux, ubuntu1404, ubuntu1604, centos6 or centos7",
+        help="Specifies the OS of the base AMI. "
+        "Valid options are: alinux, ubuntu1604, ubuntu1804, centos6, centos7.",
+    )
+    pami.add_argument(
+        "-i",
+        "--instance-type",
+        dest="instance_type",
+        default="t2.xlarge",
+        help="Sets instance type to build the ami on. Defaults to t2.xlarge.",
     )
     pami.add_argument(
         "-ap",
         "--ami-name-prefix",
         dest="custom_ami_name_prefix",
         default="custom-ami-",
-        help="specify the prefix name of the resulting AWS ParallelCluster AMI",
+        help="Specifies the prefix name of the resulting AWS ParallelCluster AMI.",
     )
     pami.add_argument(
         "-cc",
         "--custom-cookbook",
         dest="custom_ami_cookbook",
-        help="specify the cookbook to use to build the AWS ParallelCluster AMI",
+        help="Specifies the cookbook to use to build the AWS ParallelCluster AMI.",
+    )
+    pami.add_argument(
+        "--no-public-ip",
+        dest="associate_public_ip",
+        action="store_false",
+        default=True,
+        help="Do not associate public IP to the Packer instance. Defaults to associate public ip",
     )
     _addarg_config(pami)
+    pami_group1 = pami.add_argument_group("Build AMI by using VPC settings from configuration file")
+    pami_group1.add_argument(
+        "-t",
+        "--cluster-template",
+        help="Specifies the cluster section of the configuration file to retrieve VPC settings.",
+    )
+    pami_group2 = pami.add_argument_group("Build AMI in a custom VPC and Subnet")
+    pami_group2.add_argument("--vpc-id", help="Specifies the VPC to use to build the AWS ParallelCluster AMI.")
+    pami_group2.add_argument("--subnet-id", help="Specifies the Subnet to use to build the AWS ParallelCluster AMI.")
     _addarg_region(pami)
     pami.set_defaults(template_url=None)
     pami.set_defaults(func=create_ami)
 
     # configure command subparser
-    pconfigure = subparsers.add_parser("configure", help="Start initial AWS ParallelCluster configuration.")
+    pconfigure = subparsers.add_parser("configure", help="Start the AWS ParallelCluster configuration.")
     _addarg_config(pconfigure)
     pconfigure.set_defaults(func=configure)
 
     # version command subparser
-    pversion = subparsers.add_parser("version", help="Display version of AWS ParallelCluster.")
+    pversion = subparsers.add_parser("version", help="Displays the version of AWS ParallelCluster.")
     pversion.set_defaults(func=version)
+
+    # dcv command subparser
+    pdcv = subparsers.add_parser(
+        "dcv",
+        help="The dcv command permits to use NICE DCV related features.",
+        epilog='For dcv subcommand specific flags, please run: "pcluster dcv [subcommand] --help"',
+    )
+    dcv_subparsers = pdcv.add_subparsers()
+    dcv_subparsers.required = True
+    dcv_subparsers.dest = "subcommand"
+    pdcv_connect = dcv_subparsers.add_parser(
+        "connect", help="Permits to connect to the master node through an interactive session by using NICE DCV."
+    )
+    pdcv_connect.add_argument("cluster_name", help="Name of the cluster to connect to")
+    pdcv_connect.add_argument(
+        "--key-path", "-k", dest="key_path", help="Key path of the SSH key to use for the connection"
+    )
+    pdcv_connect.add_argument("--show-url", "-s", action="store_true", default=False, help="Print URL and exit")
+    pdcv.set_defaults(func=dcv)
 
     return parser
 
@@ -334,17 +432,36 @@ Variables substituted::
 def main():
     config_logger()
 
-    logger = logging.getLogger("pcluster.pcluster")
-    logger.debug("pcluster CLI starting")
+    # TODO remove logger
+    LOGGER.debug("pcluster CLI starting")
 
     parser = _get_parser()
     args, extra_args = parser.parse_known_args()
-    logger.debug(args)
-    if args.func.__name__ == "command":
-        args.func(args, extra_args)
-    else:
-        if extra_args:
-            parser.print_usage()
-            print("Invalid arguments %s..." % extra_args)
-            sys.exit(1)
-        args.func(args)
+    LOGGER.debug(args)
+
+    try:
+        # set region in the environment to make it available to all the boto3 calls
+        if "region" in args and args.region:
+            os.environ["AWS_DEFAULT_REGION"] = args.region
+
+        if args.func.__name__ == "ssh":
+            args.func(args, extra_args)
+        else:
+            if extra_args:
+                parser.print_usage()
+                print("Invalid arguments %s..." % extra_args)
+                sys.exit(1)
+            args.func(args)
+    except NoCredentialsError:
+        LOGGER.error("AWS Credentials not found.")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        LOGGER.info("Exiting...")
+        sys.exit(1)
+    except Exception as e:
+        LOGGER.exception("Unexpected error of type %s: %s", type(e).__name__, e)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

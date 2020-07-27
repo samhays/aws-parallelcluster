@@ -26,6 +26,12 @@ from tabulate import tabulate
 
 from awsbatch.utils import fail, get_region_by_stack_id, hide_keys
 
+PCLUSTER_STACK_PREFIX = "parallelcluster-"
+
+
+def _get_stack_name(cluster_name):
+    return PCLUSTER_STACK_PREFIX + cluster_name
+
 
 class Output(object):
     """Generic Output object."""
@@ -50,22 +56,24 @@ class Output(object):
         else:
             self.items.append(items)
 
-    def show_table(self, keys=None):
+    def show_table(self, keys=None, sort_keys_function=None):
         """
         Print the items table.
 
         :param keys: show a specific list of keys (optional)
+        :param sort_keys_function: function to sort table rows (optional)
         """
         rows = []
         output_keys = keys or self.keys
-        for item in self.items:
+
+        for item in self.__get_items(sort_keys_function):
             row = []
             for output_key in output_keys:
                 row.append(getattr(item, self.mapping[output_key]))
             rows.append(row)
         print(tabulate(rows, output_keys))
 
-    def show(self, keys=None):
+    def show(self, keys=None, sort_keys_function=None):
         """
         Print the items in a key value format.
 
@@ -75,7 +83,7 @@ class Output(object):
         if not self.items:
             print("No items to show")
         else:
-            for item in self.items:
+            for item in self.__get_items(sort_keys_function):
                 for output_key in output_keys:
                     print("{0:25}: {1!s}".format(output_key, getattr(item, self.mapping[output_key])))
                 print("-" * 25)
@@ -84,12 +92,18 @@ class Output(object):
         """Return number of items in Output."""
         return len(self.items)
 
+    def __get_items(self, sort_keys_function=None):
+        """Return a sorted copy of self.items if sort_keys_function is given, a reference to self.items otherwise."""
+        if sort_keys_function:
+            return sorted(list(self.items), key=sort_keys_function)
+        return self.items
+
 
 class Boto3ClientFactory(object):
     """Boto3 configuration object."""
 
     def __init__(self, region, aws_access_key_id, aws_secret_access_key, proxy="NONE"):
-        """Constructor."""
+        """Initialize the object."""
         self.region = region
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
@@ -121,7 +135,7 @@ class AWSBatchCliConfig(object):
 
     def __init__(self, log, cluster):
         """
-        Constructor.
+        Initialize the object.
 
         Search for the [cluster cluster-name] section in the /etc/awsbatch-cli.cfg configuration file, if there
         or ask to the pcluster status.
@@ -133,6 +147,7 @@ class AWSBatchCliConfig(object):
         self.aws_access_key_id = None
         self.aws_secret_access_key = None
         self.region = None
+        self.env_blacklist = None
         parallelcluster_config_file = os.path.expanduser(os.path.join("~", ".parallelcluster", "config"))
         if os.path.isfile(parallelcluster_config_file):
             self.__init_from_parallelcluster_config(parallelcluster_config_file, log)
@@ -197,7 +212,7 @@ class AWSBatchCliConfig(object):
             except (NoOptionError, NoSectionError):
                 pass
 
-    def __init_from_config(self, cli_config_file, cluster, log):
+    def __init_from_config(self, cli_config_file, cluster, log):  # noqa: C901 FIXME
         """
         Init object attributes from awsbatch-cli configuration file.
 
@@ -225,9 +240,13 @@ class AWSBatchCliConfig(object):
                 self.region = config.get("main", "region")
             except NoOptionError:
                 pass
+            try:
+                self.env_blacklist = config.get("main", "env_blacklist")
+            except NoOptionError:
+                pass
 
             try:
-                self.stack_name = "parallelcluster-" + cluster_name
+                self.stack_name = _get_stack_name(cluster_name)
                 log.info("Stack name is (%s)" % self.stack_name)
                 # if region is set for the current stack, override the region from the AWS ParallelCluster config file
                 # or the region from the [main] section
@@ -236,6 +255,10 @@ class AWSBatchCliConfig(object):
                 self.compute_environment = config.get(cluster_section, "compute_environment")
                 self.job_queue = config.get(cluster_section, "job_queue")
                 self.job_definition = config.get(cluster_section, "job_definition")
+                try:
+                    self.job_definition_mnp = config.get(cluster_section, "job_definition_mnp")
+                except NoOptionError:
+                    pass
                 self.master_ip = config.get(cluster_section, "master_ip")
 
                 # get proxy
@@ -259,7 +282,7 @@ class AWSBatchCliConfig(object):
         :param log: log
         """
         try:
-            self.stack_name = "parallelcluster-" + cluster
+            self.stack_name = _get_stack_name(cluster)
             log.info("Describing stack (%s)" % self.stack_name)
             # get required values from the output of the describe-stack command
             # don't use proxy because we are in the client and use default region
@@ -290,6 +313,8 @@ class AWSBatchCliConfig(object):
                         self.job_definition = output_value
                     elif output_key == "MasterPrivateIP":
                         self.master_ip = output_value
+                    elif output_key == "BatchJobDefinitionMnpArn":
+                        self.job_definition_mnp = output_value
 
                 for parameter in stack.get("Parameters", []):
                     if parameter.get("OutputKey") == "ProxyServer":

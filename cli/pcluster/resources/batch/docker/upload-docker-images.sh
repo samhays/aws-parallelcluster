@@ -3,9 +3,13 @@ set -eu
 
 push_docker_image() {
     local image=$1
-    echo "Uploading image image"
-    docker tag "${IMAGE_REPO_NAME}:${image}" "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${image}"
-    docker push "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${image}"
+    echo "Uploading image ${image}"
+    S3_SUFFIX=""
+    if [[ ${AWS_REGION} == cn-* ]]; then
+        S3_SUFFIX=".cn"
+    fi
+    docker tag "${IMAGE_REPO_NAME}:${image}" "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com${S3_SUFFIX}/${IMAGE_REPO_NAME}:${image}"
+    docker push "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com${S3_SUFFIX}/${IMAGE_REPO_NAME}:${image}"
 }
 
 if [ -z "${IMAGE}" ]; then

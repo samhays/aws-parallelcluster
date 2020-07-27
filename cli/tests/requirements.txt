@@ -1,5 +1,9 @@
+jinja2
 pytest
 pytest-cov
+pytest-datadir
 pytest-html
 pytest-mock
-moto
+assertpy
+codecov
+recordclass

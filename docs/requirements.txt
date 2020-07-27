@@ -1,8 +1,0 @@
-sphinx
-sphinx-argparse
-tabulate
-boto3
-future
-configparser
-sphinxcontrib-spelling
-doc8

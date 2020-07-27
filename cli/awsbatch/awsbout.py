@@ -19,7 +19,7 @@ import time
 import argparse
 
 from awsbatch.common import AWSBatchCliConfig, Boto3ClientFactory, config_logger
-from awsbatch.utils import convert_to_date, fail, is_job_array
+from awsbatch.utils import convert_to_date, fail, get_job_type
 
 
 def _get_parser():
@@ -76,7 +76,7 @@ class AWSBoutCommand(object):
 
     def __init__(self, log, boto3_factory):
         """
-        Constructor.
+        Initialize the object.
 
         :param log: log
         :param boto3_factory: an initialized Boto3ClientFactory object
@@ -114,8 +114,8 @@ class AWSBoutCommand(object):
                 else:
                     container = {}
 
-                if is_job_array(job):
-                    fail("No output available for the Job Array (%s). Please ask for array children." % job["jobId"])
+                if get_job_type(job) != "SIMPLE":
+                    fail("No output available for the Job (%s). Please ask for its children." % job["jobId"])
                 else:
                     if "logStreamName" in container:
                         log_stream = container.get("logStreamName")
